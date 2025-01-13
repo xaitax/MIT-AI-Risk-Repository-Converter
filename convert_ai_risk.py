@@ -137,7 +137,7 @@ def main():
     parser.add_argument(
         "--output", "-o",
         help="Output JSON file name.",
-        default="Filtered_AI_Risk_Database_with_Metadata.json"
+        default="data.json"
     )
     parser.add_argument(
         "--sheet-name", "-s",
