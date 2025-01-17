@@ -31,7 +31,6 @@ DEFAULT_GOOGLE_SHEET_EXPORT = (
     "https://docs.google.com/spreadsheets/d/1evwjF4XmpykycpeZFq0FUteEAt7awx2i2oE6kMrV_xE/export?format=xlsx"
 )
 
-
 def display_banner():
     banner = f"""
 {BLUE}MIT AI Risk Repository Converter
@@ -40,85 +39,66 @@ Alexander Hagenah / @xaitax / ah@primepage.de{ENDC}
 """
     print(banner)
 
-
 def download_google_sheet(url: str) -> BytesIO:
-    """
-    Downloads a Google Sheet as an XLSX file and returns a BytesIO object.
-    Raises an exception if the download fails.
-    """
     print(f"Downloading Google Sheet from: {url}")
     response = requests.get(url)
     response.raise_for_status()
     return BytesIO(response.content)
 
-
 def load_excel_content(file_source, sheet_name: str, header_row: int = 0) -> pd.DataFrame:
-    """
-    Loads the specified sheet from the Excel content into a DataFrame. `file_source` can be:
-      - A BytesIO object (downloaded content)
-      - A local file path (string)
-    """
-    source_type = file_source if isinstance(
-        file_source, str) else "downloaded data"
+    source_type = file_source if isinstance(file_source, str) else "downloaded data"
     print(f"Reading sheet '{sheet_name}' from {source_type}")
     return pd.read_excel(file_source, sheet_name=sheet_name, header=header_row)
 
+def rename_columns(df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
+    df.columns = df.columns.str.strip()
+    return df.rename(columns=column_mapping)
 
-def filter_and_convert_to_json(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> str:
-    """
-    Merges the main DataFrame with metadata, adds a unique ID, and converts to JSON.
-    Returns the JSON string.
-    """
-    print("Preparing metadata DataFrame...")
+def validate_columns(df: pd.DataFrame, required_columns: list, sheet_name: str):
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        print(f"Error: Missing required columns {missing_columns} in {sheet_name}.")
+        sys.exit(1)
 
-    metadata_df = metadata_df.rename(
-        columns={col: f"Metadata_{col}" if col !=
-                 "QuickRef" else col for col in metadata_df.columns}
-    )
-
-    print("Merging main DataFrame with metadata based on 'QuickRef'...")
-    merged_df = pd.merge(main_df, metadata_df, on="QuickRef", how="left")
-
-    merged_df.insert(0, "ID", range(1, len(merged_df) + 1))
+def merge_and_transform(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> pd.DataFrame:
+    print("Merging main DataFrame with metadata based on 'quickRef'...")
+    merged_df = pd.merge(main_df, metadata_df, on="quickRef", how="left")
+    
+    merged_df.insert(0, "id", range(1, len(merged_df) + 1))
 
     metadata_columns = [
-        "Metadata_Included",
-        "Metadata_Paper_ID",
-        "Metadata_Title",
-        "Metadata_Authors (full)",
-        "Metadata_Authors (short)",
-        "Metadata_Year",
-        "Metadata_DOI",
-        "Metadata_URL",
-        "Metadata_Citations (28 May 2024)",
-        "Metadata_Cites/yr",
-        "Metadata_Item type"
+        "included", "paperId", "title", "authorsFull", "authorsShort",
+        "year", "doi", "url", "citations", "citesPerYear", "itemType"
     ]
+    metadata_columns = [col for col in metadata_columns if col in merged_df.columns]
 
-    main_columns = [
-        "ID",
-        "Title",
-        "QuickRef",
-        "Ev_ID",
-        "Category level",
-        "Risk category",
-        "Risk subcategory",
-        "Description",
-        "Additional ev.",
-        "Entity",
-        "Intent",
-        "Timing",
-        "Domain",
-        "Sub-domain"
-    ]
+    merged_df["metadata"] = merged_df.apply(
+        lambda row: {col: row[col] for col in metadata_columns}, axis=1
+    )
 
-    final_columns = [col for col in metadata_columns +
-                     main_columns if col in merged_df.columns]
-    df_filtered = merged_df[final_columns]
+    category_columns = ["categoryLevel", "riskCategory", "riskSubcategory"]
+    category_columns = [col for col in category_columns if col in merged_df.columns]
 
+    merged_df["category"] = merged_df.apply(
+        lambda row: {col: row[col] for col in category_columns}, axis=1
+    )
+
+    merged_df.drop(columns=metadata_columns + category_columns, inplace=True)
+
+    return merged_df
+
+def convert_to_json(df: pd.DataFrame) -> str:
     print("Converting merged DataFrame to JSON...")
-    return df_filtered.to_json(orient="records", indent=4)
+    return df.to_json(orient="records", indent=4)
 
+def save_json_to_file(json_data: str, output_path: str):
+    try:
+        with open(output_path, "w", encoding="utf-8") as json_file:
+            json_file.write(json_data)
+        print(f"Filtered JSON with metadata saved to {output_path}")
+    except Exception as e:
+        print(f"Error writing JSON file: {e}")
+        sys.exit(1)
 
 def main():
     display_banner()
@@ -152,40 +132,60 @@ def main():
 
     args = parser.parse_args()
 
-    if args.input:
-        file_source = args.input.strip()
-    else:
-        print("No input provided; using default Google Sheets link.")
-        file_source = download_google_sheet(DEFAULT_GOOGLE_SHEET_EXPORT)
+    file_source = args.input.strip() if args.input else download_google_sheet(DEFAULT_GOOGLE_SHEET_EXPORT)
 
     try:
-        ai_risk_database = load_excel_content(
-            file_source, sheet_name=args.sheet_name, header_row=2)
+        main_sheet_mapping = {
+            "QuickRef": "quickRef",
+            "Title": "title",
+            "Description": "description",
+            "Ev_ID": "evidenceId",
+            "Category level": "categoryLevel",
+            "Risk category": "riskCategory",
+            "Risk subcategory": "riskSubcategory",
+            "Additional ev.": "additionalEvidence",
+            "Entity": "entity",
+            "Intent": "intent",
+            "Timing": "timing",
+            "Domain": "domain",
+            "Sub-domain": "subDomain"
+        }
+        
+        metadata_mapping = {
+            "QuickRef": "quickRef",
+            "Included": "included",
+            "Paper_ID": "paperId",
+            "Title": "title",
+            "Authors (full)": "authorsFull",
+            "Authors (short)": "authorsShort",
+            "Year": "year",
+            "DOI": "doi",
+            "URL": "url",
+            "Citations (28 May 2024)": "citations",
+            "Cites/yr": "citesPerYear",
+            "Item type": "itemType"
+        }
 
-        metadata = load_excel_content(
-            file_source, sheet_name=args.metadata_sheet, header_row=11)
+        ai_risk_database = rename_columns(
+            load_excel_content(file_source, sheet_name=args.sheet_name, header_row=2),
+            main_sheet_mapping
+        )
+        validate_columns(ai_risk_database, ["quickRef"], args.sheet_name)
+
+        metadata = rename_columns(
+            load_excel_content(file_source, sheet_name=args.metadata_sheet, header_row=11),
+            metadata_mapping
+        )
+        validate_columns(metadata, ["quickRef"], args.metadata_sheet)
+
+        merged_data = merge_and_transform(ai_risk_database, metadata)
+        filtered_json = convert_to_json(merged_data)
+
+        save_json_to_file(filtered_json, args.output)
+
     except Exception as e:
-        print(f"Error loading Excel file: {e}")
+        print(f"Error processing data: {e}")
         sys.exit(1)
-
-    if 'QuickRef' not in ai_risk_database.columns:
-        print("Error: 'QuickRef' column not found in the main sheet.")
-        sys.exit(1)
-    if 'QuickRef' not in metadata.columns:
-        print("Error: 'QuickRef' column not found in the metadata sheet.")
-        sys.exit(1)
-
-    filtered_json_str = filter_and_convert_to_json(ai_risk_database, metadata)
-
-    output_path = args.output
-    try:
-        with open(output_path, "w", encoding="utf-8") as json_file:
-            json_file.write(filtered_json_str)
-        print(f"Filtered JSON with metadata saved to {output_path}")
-    except Exception as e:
-        print(f"Error writing JSON file: {e}")
-        sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
