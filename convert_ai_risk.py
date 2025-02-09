@@ -31,6 +31,10 @@ DEFAULT_GOOGLE_SHEET_EXPORT = (
     "https://docs.google.com/spreadsheets/d/1evwjF4XmpykycpeZFq0FUteEAt7awx2i2oE6kMrV_xE/export?format=xlsx"
 )
 
+MAIN_SHEET_HEADER_ROW = 2
+METADATA_SHEET_HEADER_ROW = 11
+
+
 def display_banner():
     banner = f"""
 {BLUE}MIT AI Risk Repository Converter
@@ -39,31 +43,41 @@ Alexander Hagenah / @xaitax / ah@primepage.de{ENDC}
 """
     print(banner)
 
+
 def download_google_sheet(url: str) -> BytesIO:
     print(f"Downloading Google Sheet from: {url}")
     response = requests.get(url)
     response.raise_for_status()
     return BytesIO(response.content)
 
+
 def load_excel_content(file_source, sheet_name: str, header_row: int = 0) -> pd.DataFrame:
-    source_type = file_source if isinstance(file_source, str) else "downloaded data"
-    print(f"Reading sheet '{sheet_name}' from {source_type}")
+    source_info = file_source if isinstance(file_source, str) else "downloaded data"
+    print(f"Reading sheet '{sheet_name}' from {source_info}")
     return pd.read_excel(file_source, sheet_name=sheet_name, header=header_row)
+
 
 def rename_columns(df: pd.DataFrame, column_mapping: dict) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
     return df.rename(columns=column_mapping)
 
+
 def validate_columns(df: pd.DataFrame, required_columns: list, sheet_name: str):
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
-        print(f"Error: Missing required columns {missing_columns} in {sheet_name}.")
-        sys.exit(1)
+        raise ValueError(f"Missing required columns {missing_columns} in {sheet_name}.")
+
+
+def load_and_prepare_sheet(file_source, sheet_name, header_row, mapping):
+    df = load_excel_content(file_source, sheet_name, header_row)
+    df = rename_columns(df, mapping)
+    validate_columns(df, ["quickRef"], sheet_name)
+    return df
+
 
 def merge_and_transform(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> pd.DataFrame:
     print("Merging main DataFrame with metadata based on 'quickRef'...")
     merged_df = pd.merge(main_df, metadata_df, on="quickRef", how="left")
-    
     merged_df.insert(0, "id", range(1, len(merged_df) + 1))
 
     metadata_columns = [
@@ -72,24 +86,20 @@ def merge_and_transform(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> pd.
     ]
     metadata_columns = [col for col in metadata_columns if col in merged_df.columns]
 
-    merged_df["metadata"] = merged_df.apply(
-        lambda row: {col: row[col] for col in metadata_columns}, axis=1
-    )
-
     category_columns = ["categoryLevel", "riskCategory", "riskSubcategory"]
     category_columns = [col for col in category_columns if col in merged_df.columns]
 
-    merged_df["category"] = merged_df.apply(
-        lambda row: {col: row[col] for col in category_columns}, axis=1
-    )
+    merged_df["metadata"] = merged_df[metadata_columns].to_dict(orient="records")
+    merged_df["category"] = merged_df[category_columns].to_dict(orient="records")
 
     merged_df.drop(columns=metadata_columns + category_columns, inplace=True)
-
     return merged_df
+
 
 def convert_to_json(df: pd.DataFrame) -> str:
     print("Converting merged DataFrame to JSON...")
     return df.to_json(orient="records", indent=4)
+
 
 def save_json_to_file(json_data: str, output_path: str):
     try:
@@ -100,9 +110,8 @@ def save_json_to_file(json_data: str, output_path: str):
         print(f"Error writing JSON file: {e}")
         sys.exit(1)
 
-def main():
-    display_banner()
 
+def parse_cli_args():
     parser = argparse.ArgumentParser(
         description="Download/Load AI Risk Repository XLSX and convert to filtered JSON, including metadata."
     )
@@ -129,12 +138,19 @@ def main():
         help="Name of the metadata sheet to load from the Excel file.",
         default="Included resources"
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    file_source = args.input.strip() if args.input else download_google_sheet(DEFAULT_GOOGLE_SHEET_EXPORT)
+def main():
+    display_banner()
+    args = parse_cli_args()
 
     try:
+        if args.input:
+            file_source = args.input.strip()
+        else:
+            file_source = download_google_sheet(DEFAULT_GOOGLE_SHEET_EXPORT)
+
         main_sheet_mapping = {
             "QuickRef": "quickRef",
             "Title": "title",
@@ -166,26 +182,21 @@ def main():
             "Item type": "itemType"
         }
 
-        ai_risk_database = rename_columns(
-            load_excel_content(file_source, sheet_name=args.sheet_name, header_row=2),
-            main_sheet_mapping
+        ai_risk_database = load_and_prepare_sheet(
+            file_source, args.sheet_name, MAIN_SHEET_HEADER_ROW, main_sheet_mapping
         )
-        validate_columns(ai_risk_database, ["quickRef"], args.sheet_name)
-
-        metadata = rename_columns(
-            load_excel_content(file_source, sheet_name=args.metadata_sheet, header_row=11),
-            metadata_mapping
+        metadata = load_and_prepare_sheet(
+            file_source, args.metadata_sheet, METADATA_SHEET_HEADER_ROW, metadata_mapping
         )
-        validate_columns(metadata, ["quickRef"], args.metadata_sheet)
 
         merged_data = merge_and_transform(ai_risk_database, metadata)
         filtered_json = convert_to_json(merged_data)
-
         save_json_to_file(filtered_json, args.output)
 
     except Exception as e:
         print(f"Error processing data: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
