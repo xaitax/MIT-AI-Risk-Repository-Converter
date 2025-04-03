@@ -3,57 +3,41 @@
 """
 MIT AI Risk Repository Converter
 
-Downloads an AI risk repository from a default Google Sheets link (or uses
-a user-provided XLSX file), then filters and converts it to JSON, including
-metadata from the "Included resources" sheet.
+Loads an AI risk repository from a local XLSX file, then filters and converts
+it to JSON, including metadata from the "Included resources" sheet.
 
 Usage:
-  python convert_ai_risk.py [--input FILE_OR_URL] [--output OUTPUT_JSON] [--sheet-name SHEET_NAME]
+  python convert_ai_risk.py [--input FILE] [--output OUTPUT_JSON] [--sheet-name SHEET_NAME]
 
 Examples:
   python convert_ai_risk.py
   python convert_ai_risk.py --input path/to/local.xlsx
-  python convert_ai_risk.py --input https://docs.google.com/spreadsheets/d/.../export?format=xlsx
   python convert_ai_risk.py --output my_filtered.json
-  python convert_ai_risk.py --sheet-name "AI Risk Database v2"
+  python convert_ai_risk.py --sheet-name "AI Risk Database v3"
 """
 
 import argparse
 import sys
-from io import BytesIO
-import requests
 import pandas as pd
 
 BLUE = "\033[94m"
 ENDC = "\033[0m"
 
-DEFAULT_GOOGLE_SHEET_EXPORT = (
-    "https://docs.google.com/spreadsheets/d/1evwjF4XmpykycpeZFq0FUteEAt7awx2i2oE6kMrV_xE/export?format=xlsx"
-)
-
 MAIN_SHEET_HEADER_ROW = 2
 METADATA_SHEET_HEADER_ROW = 11
-
+DEFAULT_INPUT_FILE = "The AI Risk Repository V3_26_03_2025.xlsx"
 
 def display_banner():
     banner = f"""
 {BLUE}MIT AI Risk Repository Converter
-A tool for downloading and converting MIT's AI Risk Repository to JSON.
+A tool for converting MIT's AI Risk Repository to JSON.
 Alexander Hagenah / @xaitax / ah@primepage.de{ENDC}
 """
     print(banner)
 
 
-def download_google_sheet(url: str) -> BytesIO:
-    print(f"Downloading Google Sheet from: {url}")
-    response = requests.get(url)
-    response.raise_for_status()
-    return BytesIO(response.content)
-
-
 def load_excel_content(file_source, sheet_name: str, header_row: int = 0) -> pd.DataFrame:
-    source_info = file_source if isinstance(file_source, str) else "downloaded data"
-    print(f"Reading sheet '{sheet_name}' from {source_info}")
+    print(f"Reading sheet '{sheet_name}' from {file_source}")
     return pd.read_excel(file_source, sheet_name=sheet_name, header=header_row)
 
 
@@ -113,15 +97,12 @@ def save_json_to_file(json_data: str, output_path: str):
 
 def parse_cli_args():
     parser = argparse.ArgumentParser(
-        description="Download/Load AI Risk Repository XLSX and convert to filtered JSON, including metadata."
+        description="Load AI Risk Repository XLSX and convert to filtered JSON, including metadata."
     )
     parser.add_argument(
         "--input", "-i",
-        help=(
-            "Path to a local XLSX file OR a direct export URL from Google Sheets. "
-            "If not provided, the default Google Sheet will be downloaded."
-        ),
-        default=None
+        help="Path to a local XLSX file. Defaults to latest local copy.",
+        default=DEFAULT_INPUT_FILE
     )
     parser.add_argument(
         "--output", "-o",
@@ -131,7 +112,7 @@ def parse_cli_args():
     parser.add_argument(
         "--sheet-name", "-s",
         help="Name of the main sheet to load from the Excel file.",
-        default="AI Risk Database v2"
+        default="AI Risk Database v3"
     )
     parser.add_argument(
         "--metadata-sheet", "-m",
@@ -146,10 +127,7 @@ def main():
     args = parse_cli_args()
 
     try:
-        if args.input:
-            file_source = args.input.strip()
-        else:
-            file_source = download_google_sheet(DEFAULT_GOOGLE_SHEET_EXPORT)
+        file_source = args.input.strip()
 
         main_sheet_mapping = {
             "QuickRef": "quickRef",
@@ -166,7 +144,7 @@ def main():
             "Domain": "domain",
             "Sub-domain": "subDomain"
         }
-        
+
         metadata_mapping = {
             "QuickRef": "quickRef",
             "Included": "included",
