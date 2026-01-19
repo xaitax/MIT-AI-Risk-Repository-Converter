@@ -13,10 +13,12 @@ Examples:
   python convert_ai_risk.py
   python convert_ai_risk.py --input path/to/local.xlsx
   python convert_ai_risk.py --output my_filtered.json
-  python convert_ai_risk.py --sheet-name "AI Risk Database v3"
+  python convert_ai_risk.py --sheet-name "AI Risk Database v4"
 """
 
 import argparse
+import json
+import re
 import sys
 import pandas as pd
 
@@ -25,7 +27,7 @@ ENDC = "\033[0m"
 
 MAIN_SHEET_HEADER_ROW = 2
 METADATA_SHEET_HEADER_ROW = 11
-DEFAULT_INPUT_FILE = "The AI Risk Repository V3_26_03_2025.xlsx"
+DEFAULT_INPUT_FILE = "The AI Risk Repository V4_03_12_2025.xlsx"
 
 def display_banner():
     banner = f"""
@@ -59,30 +61,132 @@ def load_and_prepare_sheet(file_source, sheet_name, header_row, mapping):
     return df
 
 
-def merge_and_transform(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> pd.DataFrame:
-    print("Merging main DataFrame with metadata based on 'quickRef'...")
-    merged_df = pd.merge(main_df, metadata_df, on="quickRef", how="left")
-    merged_df.insert(0, "id", range(1, len(merged_df) + 1))
-
-    metadata_columns = [
-        "included", "paperId", "title", "authorsFull", "authorsShort",
-        "year", "doi", "url", "citations", "citesPerYear", "itemType"
-    ]
-    metadata_columns = [col for col in metadata_columns if col in merged_df.columns]
-
-    category_columns = ["categoryLevel", "riskCategory", "riskSubcategory"]
-    category_columns = [col for col in category_columns if col in merged_df.columns]
-
-    merged_df["metadata"] = merged_df[metadata_columns].to_dict(orient="records")
-    merged_df["category"] = merged_df[category_columns].to_dict(orient="records")
-
-    merged_df.drop(columns=metadata_columns + category_columns, inplace=True)
-    return merged_df
+def parse_coded_field(value):
+    """Parse fields like '2 - AI' into {'code': 2, 'label': 'AI'}"""
+    if pd.isna(value) or value is None:
+        return None
+    value = str(value).strip()
+    match = re.match(r'^(\d+)\s*-\s*(.+)$', value)
+    if match:
+        return {"code": int(match.group(1)), "label": match.group(2).strip()}
+    return {"code": None, "label": value}
 
 
-def convert_to_json(df: pd.DataFrame) -> str:
-    print("Converting merged DataFrame to JSON...")
-    return df.to_json(orient="records", indent=4)
+def parse_domain(value):
+    """Parse fields like '6. Socioeconomic and Environmental' into {'code': '6', 'label': '...'}"""
+    if pd.isna(value) or value is None:
+        return None
+    value = str(value).strip()
+    match = re.match(r'^(\d+)\.\s*(.+)$', value)
+    if match:
+        return {"code": match.group(1), "label": match.group(2).strip()}
+    return {"code": None, "label": value}
+
+
+def parse_subdomain(value):
+    """Parse fields like '6.5 > Governance failure' into {'code': '6.5', 'label': '...'}"""
+    if pd.isna(value) or value is None:
+        return None
+    value = str(value).strip()
+    match = re.match(r'^([\d.]+)\s*>\s*(.+)$', value)
+    if match:
+        return {"code": match.group(1), "label": match.group(2).strip()}
+    return {"code": None, "label": value}
+
+
+def safe_int(value):
+    """Convert to int if possible, else return None"""
+    if pd.isna(value) or value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def safe_str(value):
+    """Convert to string if not null, else return None"""
+    if pd.isna(value) or value is None:
+        return None
+    return str(value).strip() if str(value).strip() else None
+
+
+def build_record(row, metadata_lookup, record_id):
+    """Build a single structured JSON record from a row"""
+    quick_ref = safe_str(row.get("quickRef"))
+    meta = metadata_lookup.get(quick_ref, {})
+
+    record = {
+        "id": record_id,
+        "evidenceId": safe_str(row.get("evidenceId")),
+        "type": safe_str(row.get("categoryLevel")),
+        "description": safe_str(row.get("description")),
+        "additionalEvidence": safe_str(row.get("additionalEvidence")),
+
+        "source": {
+            "quickRef": quick_ref,
+            "paperId": safe_int(row.get("paperId")),
+            "title": safe_str(meta.get("title")),
+            "authors": {
+                "full": safe_str(meta.get("authorsFull")),
+                "short": safe_str(meta.get("authorsShort"))
+            },
+            "year": safe_int(meta.get("year")),
+            "doi": safe_str(meta.get("doi")),
+            "url": safe_str(meta.get("url")),
+            "citations": safe_int(meta.get("citations")),
+            "citesPerYear": safe_int(meta.get("citesPerYear")),
+            "itemType": safe_str(meta.get("itemType"))
+        },
+
+        "classification": {
+            "riskCategory": safe_str(row.get("riskCategory")),
+            "riskSubcategory": safe_str(row.get("riskSubcategory")),
+            "categoryId": safe_int(row.get("categoryId")),
+            "subcategoryId": safe_int(row.get("subcategoryId"))
+        },
+
+        "causalTaxonomy": {
+            "entity": parse_coded_field(row.get("entity")),
+            "intent": parse_coded_field(row.get("intent")),
+            "timing": parse_coded_field(row.get("timing"))
+        },
+
+        "domainTaxonomy": {
+            "domain": parse_domain(row.get("domain")),
+            "subdomain": parse_subdomain(row.get("subDomain"))
+        },
+
+        "references": {
+            "definitionPage": safe_int(row.get("definitionPage")),
+            "additionalEvidencePage": safe_int(row.get("additionalEvidencePage"))
+        }
+    }
+
+    return record
+
+
+def merge_and_transform(main_df: pd.DataFrame, metadata_df: pd.DataFrame) -> list:
+    print("Building structured JSON records...")
+
+    # Create metadata lookup by quickRef
+    metadata_lookup = {}
+    for _, row in metadata_df.iterrows():
+        qr = safe_str(row.get("quickRef"))
+        if qr:
+            metadata_lookup[qr] = row.to_dict()
+
+    records = []
+    for idx, row in main_df.iterrows():
+        record = build_record(row, metadata_lookup, idx + 1)
+        records.append(record)
+
+    return records
+
+
+def convert_to_json(records: list) -> str:
+    print("Converting to JSON...")
+    return json.dumps(records, indent=2, ensure_ascii=False)
 
 
 def save_json_to_file(json_data: str, output_path: str):
@@ -112,7 +216,7 @@ def parse_cli_args():
     parser.add_argument(
         "--sheet-name", "-s",
         help="Name of the main sheet to load from the Excel file.",
-        default="AI Risk Database v3"
+        default="AI Risk Database v4"
     )
     parser.add_argument(
         "--metadata-sheet", "-m",
@@ -134,10 +238,16 @@ def main():
             "Title": "title",
             "Description": "description",
             "Ev_ID": "evidenceId",
+            "Paper_ID": "paperId",
+            "Cat_ID": "categoryId",
+            "SubCat_ID": "subcategoryId",
+            "AddEv_ID": "additionalEvidenceId",
             "Category level": "categoryLevel",
             "Risk category": "riskCategory",
             "Risk subcategory": "riskSubcategory",
             "Additional ev.": "additionalEvidence",
+            "P.Def": "definitionPage",
+            "p.AddEv": "additionalEvidencePage",
             "Entity": "entity",
             "Intent": "intent",
             "Timing": "timing",
